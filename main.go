@@ -15,6 +15,7 @@ import (
 
 	//"regexp"
 	//"strings"
+	//"github.com/adrg/frontmatter"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
@@ -53,6 +54,62 @@ func copyFile(srcPath, destPath string) error {
 	return nil
 }
 
+func assignFrontMatter(path string, content []byte) (string, bool) {
+
+	// Getting filename without extension
+	fileName := filepath.Base(path)
+	extension := filepath.Ext(path)
+	title := fileName[:len(fileName)-len(extension)]
+
+	// front-matter template
+	template := `---
+title: %s
+tags: %s
+---
+`
+	// Parse the Markdown content
+	doc := md.Parser().Parse(text.NewReader(content))
+	// List the tags.
+	hashtags := make(map[string]struct{})
+	ast.Walk(doc, func(node ast.Node, enter bool) (ast.WalkStatus, error) {
+		if n, ok := node.(*hashtag.Node); ok && enter {
+			hashtags[string(n.Tag)] = struct{}{}
+		}
+		return ast.WalkContinue, nil
+	})
+
+	//fmt.Println(hashtags)
+
+	_, present := hashtags["publish"]
+	if present {
+		var tags string
+
+		for tagName := range hashtags {
+			if tagName != "publish" {
+				tags += ("\n- " + tagName)
+			}
+		}
+		return fmt.Sprintf(template, title, tags), present
+	} else {
+		return "", present
+	}
+}
+
+func createIndex(indexPath string, index string) (error, string) {
+	indexContent, err := ioutil.ReadFile(indexPath)
+	if err != nil {
+		fmt.Println("Error reading file:", err)
+		return err, ""
+	}
+
+	frontMatter, _ := assignFrontMatter(indexPath, indexContent)
+
+	finalContent := frontMatter + string(indexContent) + index
+
+	return nil, finalContent
+
+}
+
 func main() {
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: %s [OPTIONS]\n", os.Args[0])
@@ -75,7 +132,8 @@ func main() {
 		flag.Usage()
 		os.Exit(1)
 	}
-
+	indexPath := ""
+	index := ""
 	err := filepath.WalkDir(*in, func(path string, d fs.DirEntry, e error) error {
 		if e != nil {
 			return e
@@ -96,49 +154,20 @@ func main() {
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
 			return err
 		}
-		if filepath.Ext(d.Name()) == ".md" {
-
-			// Getting filename without extension
-			fileName := filepath.Base(path)
-			extension := filepath.Ext(path)
-			title := fileName[:len(fileName)-len(extension)]
-
-			// front-matter template
-			template := `---
-title: %s
-tags: %s
----
-`
+		if filepath.Ext(d.Name()) == ".md" && filepath.Base(d.Name()) != "_index.md" {
+			fmt.Println(filepath.Base(d.Name()))
 			// Read the existing file content
 			content, err := ioutil.ReadFile(path)
 			if err != nil {
 				fmt.Println("Error reading file:", err)
 				return err
 			}
-			// Parse the Markdown content
-			doc := md.Parser().Parse(text.NewReader(content))
-			// List the tags.
-			hashtags := make(map[string]struct{})
-			ast.Walk(doc, func(node ast.Node, enter bool) (ast.WalkStatus, error) {
-				if n, ok := node.(*hashtag.Node); ok && enter {
-					hashtags[string(n.Tag)] = struct{}{}
-				}
-				return ast.WalkContinue, nil
-			})
 
-			//fmt.Println(hashtags)
-			_, present := hashtags["publish"]
-			if present {
-				var tags string
-
-				for tagName, _ := range hashtags {
-					if tagName != "publish" {
-						tags += ("\n- " + tagName)
-					}
-				}
-
+			frontMatter, publish := assignFrontMatter(path, content)
+			if publish {
+				index += "\n[[" + filepath.Base(d.Name())[:len(filepath.Base(d.Name()))-len(filepath.Ext(d.Name()))] + "]]"
 				// Prepend the template to the content
-				finalContent := fmt.Sprintf(template, title, tags) + string(content)
+				finalContent := frontMatter + string(content)
 
 				// Write the modified content back to the file
 				err = ioutil.WriteFile(destPath, []byte(finalContent), 0644)
@@ -153,6 +182,9 @@ tags: %s
 				fmt.Println("Skipping " + path)
 			}
 
+		} else if filepath.Base(d.Name()) == "_index.md" {
+			indexPath = path
+			fmt.Println(indexPath + "saved")
 		} else {
 			// Copy the file
 			if err := copyFile(path, destPath); err != nil {
@@ -164,6 +196,26 @@ tags: %s
 
 		return nil
 	})
+
+	// Create index file
+	indexErr, createdIndex := createIndex(indexPath, index)
+
+	if indexErr != nil {
+		fmt.Println("Index file error: ", err)
+	} else {
+		// Create the corresponding destination path
+		relativePath, _ := filepath.Rel(*in, indexPath)
+		destPath := filepath.Join(*out, relativePath)
+		fmt.Println("PATHS: ", relativePath, destPath)
+
+		err = ioutil.WriteFile(destPath, []byte(createdIndex), 0644)
+		if err != nil {
+			fmt.Println("Error writing file:", err)
+		}
+
+		fmt.Println("Index created at:", destPath)
+
+	}
 
 	if err != nil {
 		fmt.Println("Error:", err)
